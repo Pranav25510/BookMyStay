@@ -1,57 +1,47 @@
+import java.io.*;
 import java.util.*;
-import java.util.concurrent.*;
 
 /**
- * Thread-safe RoomInventory
+ * Serializable Inventory Class
  */
-class ConcurrentRoomInventory {
-    private final Map<String, Integer> availability = new HashMap<>();
+class PersistentInventory implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private final Map<String, Integer> availability;
 
-    public ConcurrentRoomInventory() {
-        availability.put("Single Room", 5);
-        availability.put("Double Room", 3);
-        availability.put("Suite Room", 2);
+    public PersistentInventory(Map<String, Integer> availability) {
+        this.availability = new HashMap<>(availability);
     }
 
-    // Thread-safe allocation
-    public synchronized boolean allocateRooms(String roomType, int count) {
-        int available = availability.getOrDefault(roomType, 0);
-        if (count <= 0 || count > available) {
-            return false;
-        }
-        availability.put(roomType, available - count);
-        return true;
-    }
-
-    // Thread-safe release
-    public synchronized void releaseRooms(String roomType, int count) {
-        availability.put(roomType, availability.getOrDefault(roomType, 0) + count);
-    }
-
-    public synchronized Map<String, Integer> getAvailability() {
+    public Map<String, Integer> getAvailability() {
         return new HashMap<>(availability);
+    }
+
+    public void updateAvailability(String roomType, int count) {
+        availability.put(roomType, count);
+    }
+
+    @Override
+    public String toString() {
+        return availability.toString();
     }
 }
 
 /**
- * Reservation class
+ * Serializable Reservation Class
  */
-class Reservation {
+class PersistentReservation implements Serializable {
+    private static final long serialVersionUID = 1L;
     private final String reservationId;
     private final String guestName;
     private final String roomType;
     private final int roomsBooked;
 
-    public Reservation(String reservationId, String guestName, String roomType, int roomsBooked) {
+    public PersistentReservation(String reservationId, String guestName, String roomType, int roomsBooked) {
         this.reservationId = reservationId;
         this.guestName = guestName;
         this.roomType = roomType;
         this.roomsBooked = roomsBooked;
     }
-
-    public String getReservationId() { return reservationId; }
-    public String getRoomType() { return roomType; }
-    public int getRoomsBooked() { return roomsBooked; }
 
     @Override
     public String toString() {
@@ -60,92 +50,89 @@ class Reservation {
 }
 
 /**
- * Thread-safe BookingService
+ * Persistence Service
  */
-class ConcurrentBookingService {
-    private final ConcurrentRoomInventory inventory;
-    private final Map<String, Reservation> confirmedBookings = new ConcurrentHashMap<>();
-    private int reservationCounter = 1;
+class PersistenceService {
 
-    public ConcurrentBookingService(ConcurrentRoomInventory inventory) {
-        this.inventory = inventory;
-    }
+    private static final String INVENTORY_FILE = "inventory.ser";
+    private static final String BOOKINGS_FILE = "bookings.ser";
 
-    public synchronized String bookRoom(String guestName, String roomType, int roomsRequested) {
-        String reservationId = "R" + (reservationCounter++);
-        boolean allocated = inventory.allocateRooms(roomType, roomsRequested);
-        if (!allocated) {
-            System.out.println(guestName + " booking failed for " + roomType + ". Not enough availability.");
-            return null;
+    // Save inventory and booking history
+    public static void saveState(PersistentInventory inventory, List<PersistentReservation> bookings) {
+        try (ObjectOutputStream invOut = new ObjectOutputStream(new FileOutputStream(INVENTORY_FILE));
+             ObjectOutputStream bookOut = new ObjectOutputStream(new FileOutputStream(BOOKINGS_FILE))) {
+
+            invOut.writeObject(inventory);
+            bookOut.writeObject(bookings);
+
+            System.out.println("System state saved successfully.");
+        } catch (IOException e) {
+            System.err.println("Failed to save system state: " + e.getMessage());
         }
-        Reservation reservation = new Reservation(reservationId, guestName, roomType, roomsRequested);
-        confirmedBookings.put(reservationId, reservation);
-        System.out.println("Booking confirmed: " + reservation);
-        return reservationId;
     }
 
-    public void displayBookings() {
-        System.out.println("\n=== Current Bookings ===");
-        confirmedBookings.values().forEach(System.out::println);
-    }
+    // Load inventory and booking history
+    public static Optional<Map.Entry<PersistentInventory, List<PersistentReservation>>> loadState() {
+        try (ObjectInputStream invIn = new ObjectInputStream(new FileInputStream(INVENTORY_FILE));
+             ObjectInputStream bookIn = new ObjectInputStream(new FileInputStream(BOOKINGS_FILE))) {
 
-    public Map<String, Reservation> getConfirmedBookings() {
-        return confirmedBookings;
-    }
-}
+            PersistentInventory inventory = (PersistentInventory) invIn.readObject();
+            List<PersistentReservation> bookings = (List<PersistentReservation>) bookIn.readObject();
+            System.out.println("System state restored successfully.");
+            return Optional.of(new AbstractMap.SimpleEntry<>(inventory, bookings));
 
-/**
- * Guest booking task for threading
- */
-class GuestBookingTask implements Runnable {
-    private final String guestName;
-    private final String roomType;
-    private final int roomsRequested;
-    private final ConcurrentBookingService bookingService;
-
-    public GuestBookingTask(String guestName, String roomType, int roomsRequested, ConcurrentBookingService service) {
-        this.guestName = guestName;
-        this.roomType = roomType;
-        this.roomsRequested = roomsRequested;
-        this.bookingService = service;
-    }
-
-    @Override
-    public void run() {
-        bookingService.bookRoom(guestName, roomType, roomsRequested);
+        } catch (FileNotFoundException e) {
+            System.out.println("Persistence files not found. Starting with fresh state.");
+        } catch (IOException | ClassNotFoundException e) {
+            System.err.println("Failed to restore system state: " + e.getMessage());
+        }
+        return Optional.empty();
     }
 }
 
 /**
- * Application Entry Point
+ * Application Entry
  */
 public class BookMyStay {
 
-    public static void main(String[] args) throws InterruptedException {
+    public static void main(String[] args) {
 
-        ConcurrentRoomInventory inventory = new ConcurrentRoomInventory();
-        ConcurrentBookingService bookingService = new ConcurrentBookingService(inventory);
+        // Attempt to restore previous state
+        Optional<Map.Entry<PersistentInventory, List<PersistentReservation>>> restoredState = PersistenceService.loadState();
 
-        // Simulate multiple guests booking concurrently
-        List<Thread> threads = new ArrayList<>();
-        threads.add(new Thread(new GuestBookingTask("Alice", "Single Room", 2, bookingService)));
-        threads.add(new Thread(new GuestBookingTask("Bob", "Suite Room", 1, bookingService)));
-        threads.add(new Thread(new GuestBookingTask("Charlie", "Double Room", 2, bookingService)));
-        threads.add(new Thread(new GuestBookingTask("Diana", "Single Room", 3, bookingService))); // Should fail if not enough rooms
-        threads.add(new Thread(new GuestBookingTask("Eve", "Suite Room", 1, bookingService))); // Should fail if none left
+        PersistentInventory inventory;
+        List<PersistentReservation> bookings;
 
-        // Start all threads
-        threads.forEach(Thread::start);
-
-        // Wait for all threads to finish
-        for (Thread t : threads) {
-            t.join();
+        if (restoredState.isPresent()) {
+            inventory = restoredState.get().getKey();
+            bookings = restoredState.get().getValue();
+        } else {
+            // Fresh state
+            Map<String, Integer> initialAvailability = new HashMap<>();
+            initialAvailability.put("Single Room", 5);
+            initialAvailability.put("Double Room", 3);
+            initialAvailability.put("Suite Room", 2);
+            inventory = new PersistentInventory(initialAvailability);
+            bookings = new ArrayList<>();
         }
 
-        // Display final booking state
-        bookingService.displayBookings();
+        // Simulate a booking
+        PersistentReservation res1 = new PersistentReservation("R1", "Alice", "Single Room", 1);
+        bookings.add(res1);
+        inventory.updateAvailability("Single Room", inventory.getAvailability().get("Single Room") - 1);
 
-        // Display remaining inventory
-        System.out.println("\nRemaining Inventory: " + inventory.getAvailability());
+        PersistentReservation res2 = new PersistentReservation("R2", "Bob", "Suite Room", 1);
+        bookings.add(res2);
+        inventory.updateAvailability("Suite Room", inventory.getAvailability().get("Suite Room") - 1);
+
+        // Display current state
+        System.out.println("\n=== Current Inventory ===");
+        System.out.println(inventory);
+
+        System.out.println("\n=== Booking History ===");
+        bookings.forEach(System.out::println);
+
+        // Save system state before shutdown
+        PersistenceService.saveState(inventory, bookings);
     }
 }
